@@ -1,7 +1,7 @@
 // cat > /home/claude/djia-stochastic.tsx << 'EOF'
 import { useState, useEffect } from "react";
 
-// Next Step install types for React
+// 1. install REACT, REACT-DOM, TYPES-REACT, chancge file extension to .tsx, add in tsconfig.json : "jsx": "react-jsx"
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -186,7 +186,7 @@ function aggregateWeekly(bars: DailyBar[]): WeeklyBar[] {
       t,
       h: Math.max(...w.highs),
       l: Math.min(...w.lows),
-      c: w.closes.at(-1)!,
+      c: w.closes[w.closes.length - 1]!,
     }));
 }
 
@@ -226,8 +226,8 @@ async function fetchStochastic(ticker: string): Promise<StochasticResult> {
 }
 
 function getZone(d: number): ZoneInfo {
-  if (d < 20) return { label: "Oversold", color: "#ef4444" };
-  if (d > 80) return { label: "Overbought", color: "#10b981" };
+  if (d < 30) return { label: "Oversold", color: "#ef4444" };
+  if (d > 70) return { label: "Overbought", color: "#10b981" };
   return { label: "Neutral", color: "#94a3b8" };
 }
 
