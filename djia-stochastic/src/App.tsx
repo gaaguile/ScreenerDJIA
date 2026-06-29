@@ -1,7 +1,7 @@
-// 1. install REACT, REACT-DOM, TYPES-REACT, chancge file extension to .tsx, add in tsconfig.json : "jsx": "react-jsx"
+// 1. install REACT, REACT-DOM, TYPES-REACT, chancge file extension to .tsx, add in tsconfig.json : "jsx": "react-jsx", import React from "react";
+// import React from "react";
 
 import { useState, type CSSProperties } from "react";
-import React from "react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -14,8 +14,8 @@ interface OHLCBar {
 
 interface TickerResult {
   ticker: string;
-  k: number; // smoothed %K
-  d: number; // %D signal line
+  k: number;
+  d: number;
   lastClose: number;
   lastDate: string;
 }
@@ -25,14 +25,11 @@ interface ZoneInfo {
   color: string;
 }
 
-interface AnthropicContentBlock {
-  type: string;
-  text?: string;
-}
-
-interface AnthropicResponse {
-  content?: AnthropicContentBlock[];
-  error?: { message: string };
+// Shape returned by our Express /api/candle endpoint
+interface CandleResponse {
+  s: string;
+  bars: OHLCBar[]; // daily OHLC bars, pre-parsed by server
+  error?: string;
 }
 
 type SortKey = "d" | "k";
@@ -106,8 +103,50 @@ const COMPANY_NAMES: Record<string, string> = {
   GOOGL: "Alphabet",
 };
 
-// ── Full Stochastic (14,3,3) ─────────────────────────────────────────────────
-// Computed locally from raw OHLC — guarantees correctness
+// ~13 months of daily bars → ~57 weekly candles, well above the 20 needed for (14,3,3)
+const FROM_TS = Math.floor(Date.now() / 1000 - 400 * 24 * 3600);
+const TO_TS = Math.floor(Date.now() / 1000);
+
+// ── Weekly aggregation from daily bars ───────────────────────────────────────
+
+function aggregateDailyToWeekly(daily: OHLCBar[]): OHLCBar[] {
+  const weeks = new Map<
+    string,
+    { highs: number[]; lows: number[]; closes: number[]; lastDate: string }
+  >();
+
+  for (const bar of daily) {
+    const d = new Date(bar.date + "T12:00:00Z");
+    const day = d.getUTCDay(); // 0 = Sun
+    const diff = d.getUTCDate() - day + (day === 0 ? -6 : 1); // rewind to Monday
+    const mon = new Date(d);
+    mon.setUTCDate(diff);
+    const key = mon.toISOString().slice(0, 10);
+
+    if (!weeks.has(key))
+      weeks.set(key, { highs: [], lows: [], closes: [], lastDate: bar.date });
+
+    const w = weeks.get(key)!;
+    w.highs.push(bar.high);
+    w.lows.push(bar.low);
+    w.closes.push(bar.close);
+    w.lastDate = bar.date; // last entry = Friday
+  }
+
+  return [...weeks.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, w]) => ({
+      date: w.lastDate,
+      high: Math.max(...w.highs),
+      low: Math.min(...w.lows),
+      close: w.closes.at(-1)!,
+    }));
+}
+
+// ── Full Stochastic (14,3,3) — computed locally ───────────────────────────────
+// Raw %K  = (Close − LowestLow₁₄)  / (HighestHigh₁₄ − LowestLow₁₄) × 100
+// Slow %K = SMA(rawK, 3)
+// %D      = SMA(slowK, 3)
 
 function sma(arr: number[], period: number): number[] {
   const out: number[] = [];
@@ -124,35 +163,56 @@ function computeFullStochastic(
   kSmooth = 3,
   dSmooth = 3,
 ): { k: number; d: number } | null {
-  // Need at least kPeriod + kSmooth + dSmooth - 2 bars for valid output
-  const minBars = kPeriod + kSmooth + dSmooth - 2;
-  if (bars.length < minBars) return null;
+  if (bars.length < kPeriod + kSmooth + dSmooth - 2) return null;
 
-  // Step 1: Raw %K for each bar i (needs kPeriod bars)
   const rawK: number[] = [];
   for (let i = kPeriod - 1; i < bars.length; i++) {
     const window = bars.slice(i - kPeriod + 1, i + 1);
     const hh = Math.max(...window.map((b) => b.high));
     const ll = Math.min(...window.map((b) => b.low));
-    const rk = hh === ll ? 50 : ((bars[i].close - ll) / (hh - ll)) * 100;
-    rawK.push(rk);
+    rawK.push(hh === ll ? 50 : ((bars[i].close - ll) / (hh - ll)) * 100);
   }
 
-  // Step 2: Smoothed %K = SMA(rawK, kSmooth)
-  const smoothedK = sma(rawK, kSmooth);
+  const slowK = sma(rawK, kSmooth);
+  const d = sma(slowK, dSmooth);
 
-  // Step 3: %D = SMA(smoothedK, dSmooth)
-  const dArr = sma(smoothedK, dSmooth);
+  if (!slowK.length || !d.length) return null;
+  return { k: slowK.at(-1)!, d: d.at(-1)! };
+}
 
-  if (smoothedK.length === 0 || dArr.length === 0) return null;
+// ── Data fetching ─────────────────────────────────────────────────────────────
 
+async function fetchTickerStochastic(
+  ticker: string,
+): Promise<TickerResult | null> {
+  // Calls our Express server — no CORS, no API key in the browser
+  const res = await fetch(
+    `/api/candle?symbol=${ticker}&from=${FROM_TS}&to=${TO_TS}`,
+  );
+
+  if (!res.ok) throw new Error(`Server error ${res.status} for ${ticker}`);
+
+  const data: CandleResponse = await res.json();
+  if (data.error) throw new Error(data.error);
+  if (data.s !== "ok" || !data.bars?.length) return null;
+
+  const daily: OHLCBar[] = data.bars;
+
+  const weekly = aggregateDailyToWeekly(daily);
+  const stoch = computeFullStochastic(weekly, 14, 3, 3);
+  if (!stoch) return null;
+
+  const last = weekly.at(-1)!;
   return {
-    k: smoothedK.at(-1)!,
-    d: dArr.at(-1)!,
+    ticker,
+    k: stoch.k,
+    d: stoch.d,
+    lastClose: last.close,
+    lastDate: last.date,
   };
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function getZone(d: number): ZoneInfo {
   if (d < 20) return { label: "Oversold", color: "#ef4444" };
@@ -160,40 +220,9 @@ function getZone(d: number): ZoneInfo {
   return { label: "Neutral", color: "#94a3b8" };
 }
 
-function extractJSON<T>(text: string): T {
-  const match = text.match(/\[[\s\S]*\]/);
-  if (!match) throw new Error("No JSON array found in API response");
-  return JSON.parse(match[0]) as T;
-}
+// ── Sub-components ────────────────────────────────────────────────────────────
 
-// Build the prompt: ask Claude to fetch raw weekly OHLC from stooq for all tickers
-function buildPrompt(tickers: string[]): string {
-  return `You are a financial data assistant. For each ticker below, fetch the weekly OHLC price data from stooq.com using this URL pattern:
-https://stooq.com/q/d/l/?s=TICKER.us&i=w
-
-Fetch each URL and parse the CSV response (columns: Date,Open,High,Low,Close,Volume).
-Return the last 60 weekly bars per ticker (most recent last).
-
-Tickers: ${tickers.join(", ")}
-
-Return ONLY a raw JSON array — no markdown, no backticks, no explanation:
-[
-  {
-    "ticker": "AAPL",
-    "bars": [
-      {"date":"2025-01-03","high":245.1,"low":230.5,"close":242.3},
-      ...
-    ]
-  },
-  ...
-]
-
-Include all ${tickers.length} tickers. Return exactly the last 60 weekly bars per ticker sorted oldest to newest.`;
-}
-
-// ── Sub-components ───────────────────────────────────────────────────────────
-
-function MiniSparkline({ k, d }: { k: number; d: number }): React.JSX.Element {
+function MiniSparkline({ k, d }: { k: number; d: number }): JSX.Element {
   const pts = [
     [0, 100 - k],
     [50, 100 - (k + d) / 2],
@@ -221,7 +250,7 @@ function MiniSparkline({ k, d }: { k: number; d: number }): React.JSX.Element {
   );
 }
 
-// ── Styles ───────────────────────────────────────────────────────────────────
+// ── Styles ────────────────────────────────────────────────────────────────────
 
 const S = {
   root: {
@@ -231,9 +260,7 @@ const S = {
     fontFamily: "'IBM Plex Mono','Courier New',monospace",
     padding: "24px 16px",
   } satisfies CSSProperties,
-
   wrap: { maxWidth: 720, margin: "0 auto" } satisfies CSSProperties,
-
   tag: {
     fontSize: 11,
     color: "#484f58",
@@ -242,7 +269,6 @@ const S = {
     padding: "2px 8px",
     borderRadius: 4,
   } satisfies CSSProperties,
-
   btn: (active = false): CSSProperties => ({
     fontSize: 11,
     padding: "4px 12px",
@@ -253,7 +279,6 @@ const S = {
     background: active ? "#1f6feb22" : "#161b22",
     color: active ? "#58a6ff" : "#8b949e",
   }),
-
   row: (isFirst: boolean, color: string): CSSProperties => ({
     background: "#161b22",
     border: `1px solid ${isFirst ? color + "66" : "#21262d"}`,
@@ -262,7 +287,6 @@ const S = {
     position: "relative",
     overflow: "hidden",
   }),
-
   badge: (color: string): CSSProperties => ({
     width: 80,
     fontSize: 10,
@@ -277,12 +301,12 @@ const S = {
   }),
 };
 
-// ── Main component ───────────────────────────────────────────────────────────
+// ── Main component ────────────────────────────────────────────────────────────
 
-export default function App(): React.JSX.Element {
+export default function App(): JSX.Element {
   const [results, setResults] = useState<TickerResult[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
-  const [progress, setProgress] = useState<string>("");
+  const [done, setDone] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const [showAll, setShowAll] = useState<boolean>(false);
   const [sortBy, setSortBy] = useState<SortKey>("d");
@@ -293,73 +317,41 @@ export default function App(): React.JSX.Element {
     setError(null);
     setResults([]);
     setFetched(false);
-    setProgress("Fetching weekly OHLC data from stooq.com via Claude…");
+    setDone(0);
 
     try {
-      // Step 1: Ask Claude to fetch raw OHLC for all tickers
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 8000,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-          messages: [{ role: "user", content: buildPrompt(DJIA_TICKERS) }],
+      // All 30 tickers fetched in parallel — server handles Finnhub calls
+      const settled = await Promise.allSettled(
+        DJIA_TICKERS.map(async (ticker) => {
+          const result = await fetchTickerStochastic(ticker);
+          setDone((n) => n + 1);
+          return result;
         }),
-      });
+      );
 
-      const data: AnthropicResponse = await response.json();
-      if (data.error) throw new Error(data.error.message);
-
-      const text = (data.content ?? [])
-        .filter((b) => b.type === "text")
-        .map((b) => b.text ?? "")
-        .join("");
-
-      if (!text.trim()) throw new Error("Empty response from API");
-
-      setProgress("Computing Full Stochastic (14,3,3) from raw price data…");
-
-      // Step 2: Parse the returned OHLC data
-      interface RawTickerData {
-        ticker: string;
-        bars: OHLCBar[];
-      }
-      const rawData = extractJSON<RawTickerData[]>(text);
-
-      // Step 3: Compute Full Stochastic (14,3,3) locally — guaranteed correct math
-      const results: TickerResult[] = [];
-
-      for (const item of rawData) {
-        if (!item.ticker || !Array.isArray(item.bars) || item.bars.length < 20)
-          continue;
-
-        const stoch = computeFullStochastic(item.bars, 14, 3, 3);
-        if (!stoch) continue;
-
-        const lastBar = item.bars.at(-1)!;
-        results.push({
-          ticker: item.ticker,
-          k: stoch.k,
-          d: stoch.d,
-          lastClose: lastBar.close,
-          lastDate: lastBar.date,
-        });
+      // If every single call failed, surface the first error
+      if (settled.every((r) => r.status === "rejected")) {
+        const first = settled[0] as PromiseRejectedResult;
+        throw new Error((first.reason as Error).message);
       }
 
-      if (results.length === 0)
-        throw new Error(
-          "Could not compute stochastic for any ticker — insufficient price data returned",
-        );
+      const computed: TickerResult[] = settled
+        .filter(
+          (r): r is PromiseFulfilledResult<TickerResult> =>
+            r.status === "fulfilled" && r.value !== null,
+        )
+        .map((r) => r.value)
+        .sort((a, b) => a.d - b.d);
 
-      results.sort((a, b) => a.d - b.d);
-      setResults(results);
+      if (computed.length === 0)
+        throw new Error("No data returned — is the Express server running?");
+
+      setResults(computed);
       setFetched(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
-      setProgress("");
     }
   }
 
@@ -373,12 +365,13 @@ export default function App(): React.JSX.Element {
     day: "numeric",
     year: "numeric",
   });
+  const pct = Math.round((done / DJIA_TICKERS.length) * 100);
 
   return (
     <div style={S.root}>
       <div style={S.wrap}>
         {/* Header */}
-        <div style={{ marginBottom: 24 }}>
+        <div style={{ marginBottom: 28 }}>
           <div
             style={{
               fontSize: 10,
@@ -411,27 +404,30 @@ export default function App(): React.JSX.Element {
             <span style={S.tag}>14, 3, 3 · Weekly</span>
           </div>
           <div style={{ fontSize: 11, color: "#8b949e", marginTop: 5 }}>
-            {todayStr} · Computed from raw OHLC · 30 components
+            {todayStr} · Daily → Weekly aggregation · Computed locally
           </div>
         </div>
 
         {/* Launch */}
         {!fetched && !loading && (
-          <div style={{ textAlign: "center", padding: "48px 0" }}>
+          <div style={{ textAlign: "center", padding: "40px 0" }}>
             <div
               style={{
                 fontSize: 12,
                 color: "#8b949e",
                 marginBottom: 8,
-                lineHeight: 1.8,
+                lineHeight: 1.9,
               }}
             >
-              Fetches raw weekly OHLC from stooq.com via Claude,
+              Fetches daily OHLC for all 30 DJIA tickers in parallel
               <br />
-              then computes Full Stochastic (14,3,3) locally.
+              via the local Express server, aggregates to weekly bars,
+              <br />
+              then computes Full Stochastic (14,3,3) in the browser.
             </div>
-            <div style={{ fontSize: 11, color: "#484f58", marginBottom: 24 }}>
-              Values match TradingView / standard charting platforms.
+            <div style={{ fontSize: 11, color: "#484f58", marginBottom: 28 }}>
+              Make sure <code style={{ color: "#79c0ff" }}>npm run server</code>{" "}
+              is running on port 3001.
             </div>
             <button
               onClick={fetchData}
@@ -456,8 +452,8 @@ export default function App(): React.JSX.Element {
 
         {/* Loading */}
         {loading && (
-          <div style={{ textAlign: "center", padding: "60px 0" }}>
-            <style>{`@keyframes bounce{0%,80%,100%{transform:scale(0.6);opacity:.3}40%{transform:scale(1.1);opacity:1}}`}</style>
+          <div style={{ textAlign: "center", padding: "48px 0" }}>
+            <style>{`@keyframes bounce{0%,80%,100%{transform:scale(.6);opacity:.3}40%{transform:scale(1.1);opacity:1}}`}</style>
             <div
               style={{
                 display: "flex",
@@ -479,9 +475,34 @@ export default function App(): React.JSX.Element {
                 />
               ))}
             </div>
-            <div style={{ fontSize: 12, color: "#8b949e" }}>{progress}</div>
-            <div style={{ fontSize: 11, color: "#484f58", marginTop: 8 }}>
-              Fetching 60 weekly bars × 30 tickers — may take ~45s…
+            <div style={{ fontSize: 13, color: "#c9d1d9", marginBottom: 6 }}>
+              Fetching from Finnhub via Express…
+            </div>
+            <div style={{ fontSize: 11, color: "#484f58" }}>
+              {done} / {DJIA_TICKERS.length} tickers
+            </div>
+            <div style={{ maxWidth: 280, margin: "14px auto 0" }}>
+              <div
+                style={{
+                  background: "#161b22",
+                  borderRadius: 4,
+                  height: 4,
+                  overflow: "hidden",
+                }}
+              >
+                <div
+                  style={{
+                    height: "100%",
+                    width: `${pct}%`,
+                    background: "linear-gradient(90deg,#1f6feb,#58a6ff)",
+                    transition: "width 0.3s ease",
+                    borderRadius: 4,
+                  }}
+                />
+              </div>
+              <div style={{ fontSize: 11, color: "#484f58", marginTop: 6 }}>
+                {pct}%
+              </div>
             </div>
           </div>
         )}
@@ -497,23 +518,27 @@ export default function App(): React.JSX.Element {
               borderRadius: 8,
               border: "1px solid #ef444444",
               marginTop: 12,
+              lineHeight: 1.8,
             }}
           >
             ⚠ {error}
-            <button
-              onClick={fetchData}
-              style={{
-                marginLeft: 16,
-                color: "#58a6ff",
-                background: "none",
-                border: "none",
-                cursor: "pointer",
-                fontFamily: "inherit",
-                fontSize: 12,
-              }}
-            >
-              ↻ Retry
-            </button>
+            <div style={{ marginTop: 8 }}>
+              <button
+                onClick={fetchData}
+                style={{
+                  color: "#58a6ff",
+                  background: "none",
+                  border: "1px solid #58a6ff44",
+                  borderRadius: 4,
+                  padding: "4px 12px",
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  fontSize: 12,
+                }}
+              >
+                ↻ Retry
+              </button>
+            </div>
           </div>
         )}
 
@@ -541,6 +566,9 @@ export default function App(): React.JSX.Element {
                 </button>
               ))}
               <div style={{ flex: 1 }} />
+              <span style={{ fontSize: 11, color: "#484f58" }}>
+                {results.length} tickers
+              </span>
               <button onClick={fetchData} style={S.btn()}>
                 ↻ Refresh
               </button>
@@ -562,7 +590,7 @@ export default function App(): React.JSX.Element {
               <div style={{ width: 52 }}>TICKER</div>
               <div style={{ flex: 1 }}>COMPANY</div>
               <div style={{ width: 56, textAlign: "center" }}>TREND</div>
-              <div style={{ width: 52, textAlign: "right" }}>CLOSE</div>
+              <div style={{ width: 60, textAlign: "right" }}>CLOSE</div>
               <div style={{ width: 44, textAlign: "right" }}>%K</div>
               <div style={{ width: 44, textAlign: "right" }}>%D</div>
               <div style={{ width: 80, textAlign: "center" }}>ZONE</div>
@@ -638,7 +666,7 @@ export default function App(): React.JSX.Element {
                         <MiniSparkline k={r.k} d={r.d} />
                       </div>
                       <div
-                        style={{ width: 52, textAlign: "right", flexShrink: 0 }}
+                        style={{ width: 60, textAlign: "right", flexShrink: 0 }}
                       >
                         <div
                           style={{
@@ -722,7 +750,7 @@ export default function App(): React.JSX.Element {
               </button>
             )}
 
-            {/* Legend + methodology note */}
+            {/* Legend */}
             <div
               style={{
                 marginTop: 14,
@@ -768,9 +796,9 @@ export default function App(): React.JSX.Element {
                   marginTop: 2,
                 }}
               >
-                Methodology: Raw %K = (Close − LowestLow₁₄) / (HighestHigh₁₄ −
-                LowestLow₁₄) × 100 · Smoothed %K = SMA(rawK, 3) · %D = SMA(%K,
-                3) · Source: stooq.com weekly OHLC
+                Raw %K = (Close − LowestLow₁₄) / (HighestHigh₁₄ − LowestLow₁₄) ×
+                100 · Slow %K = SMA(rawK, 3) · %D = SMA(slowK, 3) · Source:
+                Finnhub via Express
               </div>
             </div>
           </>
