@@ -1,7 +1,5 @@
-// 1. install REACT, REACT-DOM, TYPES-REACT, chancge file extension to .tsx, add in tsconfig.json : "jsx": "react-jsx", import React from "react";
+import { useState, CSSProperties } from "react";
 // import React from "react";
-
-import { useState, type CSSProperties } from "react";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

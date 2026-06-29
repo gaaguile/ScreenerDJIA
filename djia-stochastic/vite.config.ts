@@ -1,17 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+// In production, Cloudflare Pages routes /api/* to functions/api/*.ts automatically.
+// In local dev, run: npx wrangler pages dev dist --port 8788
+// Wrangler serves both the built frontend and the Pages Functions together,
+// so no manual proxy is needed here.
 export default defineConfig({
   plugins: [react()],
-  server: {
-    port: 5173,
-    proxy: {
-      // All /api/* requests are forwarded to the Express server.
-      // The browser never touches the Express server directly — no CORS.
-      "/api": {
-        target: "http://localhost:3001",
-        changeOrigin: true,
-      },
-    },
+  build: {
+    outDir: "dist",
   },
 });
