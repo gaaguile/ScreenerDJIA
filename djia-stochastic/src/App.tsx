@@ -474,7 +474,7 @@ export default function App(): JSX.Element {
               ))}
             </div>
             <div style={{ fontSize: 13, color: "#c9d1d9", marginBottom: 6 }}>
-              Fetching from Finnhub via Express…
+              Fetching from Yahoo Finance
             </div>
             <div style={{ fontSize: 11, color: "#484f58" }}>
               {done} / {DJIA_TICKERS.length} tickers
@@ -796,7 +796,7 @@ export default function App(): JSX.Element {
               >
                 Raw %K = (Close − LowestLow₁₄) / (HighestHigh₁₄ − LowestLow₁₄) ×
                 100 · Slow %K = SMA(rawK, 3) · %D = SMA(slowK, 3) · Source:
-                Finnhub via Express
+                Using Yahoo Finance Data contact: gabriel@gabrieltekken.com
               </div>
             </div>
           </>

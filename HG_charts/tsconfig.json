@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "target": "ES6",
+    "module": "CommonJS",
+    "sourceMap": true,
+    "types": ["node"]
+  }
+}
