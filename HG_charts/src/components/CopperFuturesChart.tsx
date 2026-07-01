@@ -22,7 +22,7 @@ export default function CopperFuturesChart() {
       <HighchartsReact
         highcharts={Highcharts}
         options={options}
-        constructorType="stockChart" // Important for futures-style charts
+        constructorType="chart"
       />
     </div>
   );

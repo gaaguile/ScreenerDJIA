@@ -1,13 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import path from "path";
 
 export default defineConfig({
+  root: path.resolve(__dirname, "HG_charts"),
   plugins: [react()],
   server: {
     port: 5173,
     proxy: {
-      // All /api/* requests are forwarded to the Express server.
-      // The browser never touches the Express server directly — no CORS.
       "/api": {
         target: "http://localhost:3001",
         changeOrigin: true,

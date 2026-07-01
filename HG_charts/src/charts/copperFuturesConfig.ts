@@ -19,8 +19,14 @@ export const darkCopperFuturesConfig = (
   subtitle: { text: "CME COMEX • Delayed", style: { color: "#8a9ba8" } },
 
   xAxis: {
+    type: "category",
     categories: contracts,
-    labels: { style: { color: "#b0b8c4" } },
+    labels: {
+      style: { color: "#b0b8c4" },
+      formatter: function () {
+        return String(this.value);
+      },
+    },
     lineColor: "#334155",
   },
 
@@ -41,11 +47,12 @@ export const darkCopperFuturesConfig = (
   series: [
     {
       name: "Copper Price",
+      type: "line" as const,
       data: priceData,
       color: "#f59e0b",
       lineWidth: 3,
       marker: { enabled: true, radius: 4 },
-    },
+    } as Highcharts.SeriesLineOptions,
     ...(oiData
       ? [
           {
@@ -55,10 +62,10 @@ export const darkCopperFuturesConfig = (
             color: "#3b82f6",
             yAxis: 1,
             opacity: 0.75,
-          },
+          } as Highcharts.SeriesColumnOptions,
         ]
       : []),
-  ],
+  ] as Highcharts.SeriesOptions[],
 
   tooltip: {
     shared: true,
@@ -66,10 +73,6 @@ export const darkCopperFuturesConfig = (
     style: { color: "#e0e0e0" },
   },
   legend: { itemStyle: { color: "#cbd5e1" } },
-
-  rangeSelector: { enabled: true },
-  navigator: { enabled: true },
-  scrollbar: { barBackgroundColor: "#475569" },
 
   credits: { enabled: false },
   exporting: { enabled: true },
